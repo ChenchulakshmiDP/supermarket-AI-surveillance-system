@@ -1,0 +1,122 @@
+
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+import cv2
+import hashlib
+import torch
+import time
+
+# Use GPU if available
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
+
+# Model & Tracker
+model = YOLO('yolov8s.pt')
+tracker = DeepSort(max_age=30, embedder="mobilenet", half=True, bgr=True)
+
+# Data Stores
+customer_ids, product_ids = {}, {}
+picked_products, customer_product_map = {}, {}
+customer_hash_map, product_hash_map = {}, {}
+
+# Counters
+customer_counter, product_counter = 1, 1
+
+def generate_hash(x1, y1, x2, y2):
+    key = f"{round(x1, -1)}{round(y1, -1)}{round(x2, -1)}_{round(y2, -1)}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+def draw_info(frame, text, pos, color):
+    cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+def process_frame(frame):
+    global customer_counter, product_counter
+    results = model(frame)
+    detections = []
+
+    for r in results[0].boxes.data.tolist():
+        x1, y1, x2, y2, conf, cls = r
+        label = model.names[int(cls)]
+        if conf > 0.5:
+            detections.append(([x1, y1, x2 - x1, y2 - y1], conf, label))
+
+    tracks = tracker.update_tracks(detections, frame=frame)
+    person_centers = {}
+
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+
+        x1, y1, x2, y2 = map(int, track.to_ltrb())
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        label = track.get_det_class()
+        track_id = track.track_id
+        identity_hash = generate_h
+
+if label == 'person':
+            if track_id not in customer_ids:
+                customer_ids[track_id] = customer_hash_map.get(identity_hash, f"Customer_{customer_counter:03d}")
+                customer_hash_map[identity_hash] = customer_ids[track_id]
+                if customer_ids[track_id] == f"Customer_{customer_counter:03d}":
+                    customer_counter += 1
+
+            customer_id = customer_ids[track_id]
+            person_centers[track_id] = (cx, cy)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            draw_info(frame, customer_id, (x1, y1 - 10), (0, 255, 0))
+
+        else:
+            if track_id not in product_ids:
+                product_ids[track_id] = product_hash_map.get(identity_hash, f"Product_{product_counter:03d}")
+                product_hash_map[identity_hash] = product_ids[track_id]
+                if product_ids[track_id] == f"Product_{product_counter:03d}":
+                    product_counter += 1
+
+            product_id = product_ids[track_id]
+            for person_id, (px, py) in person_centers.items():
+                if ((cx - px)2 + (cy - py)2)**0.5 < 100:
+                    picked_products[track_id] = (x1, y1, x2, y2)
+                    cust_id = customer_ids[person_id]
+                    customer_product_map.setdefault(cust_id, set()).add(product_id)
+                    break
+
+    # Draw picked products
+    for pid, box in picked_products.items():
+        x1, y1, x2, y2 = box
+        label = product_ids.get(pid, "Unknown")
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        draw_info(frame, label, (x1, y1 - 10), (0, 0, 255))
+
+def run_tracker(video_source=0):
+    cap = cv2.VideoCapture(video_source)
+    fps_start = time.time()
+    frame_count = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        process_frame(frame)
+
+        frame_count += 1
+        if frame_count % 10 == 0:
+            fps = frame_count / (time.time() - fps_start)
+            draw_info(frame, f"FPS: {fps:.2f}", (10, 30), (255, 255, 0))
+
+        cv2.imshow("Supermarket AI Tracker", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    print("\n--- Final Pickup Log ---")
+    with open("pickup_log.txt", "w") as f:
+        for customer, products in customer_product_map.items():
+            line = f"{customer} picked: {', '.join(products)}"
+            print(line)
+            f.write(line + "\n")
+
+# Run
+run_tracker()  # or run_tracker("video.mp4") for a video file
