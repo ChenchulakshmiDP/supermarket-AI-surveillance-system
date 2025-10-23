@@ -1,0 +1,90 @@
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+import cv2
+import time
+
+model = YOLO('yolov8l.pt')
+tracker = DeepSort(max_age=60)
+
+customer_ids, product_ids = {}, {}
+picked_products = {}  # product_track_id -> (x1, y1, x2, y2)
+customer_product_map = {}
+
+product_seen_time = {}  # product_track_id -> timestamp
+pickup_threshold = 1.5  # seconds within proximity before confirming pickup
+distance_threshold = 100
+
+customer_counter = 1
+product_counter = 1
+
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    detections = []
+    results = model(frame)
+
+    for x1, y1, x2, y2, conf, cls in results[0].boxes.data.tolist():
+        label = model.names[int(cls)]
+        if label == "person" or conf > 0.5:
+            detections.append(([x1, y1, x2 - x1, y2 - y1], conf, label))
+
+    tracks = tracker.update_tracks(detections, frame=frame)
+    person_centers = {}
+
+    for track in tracks:
+        if not track.is_confirmed(): continue
+
+        track_id = track.track_id
+        label = track.get_det_class()
+        x1, y1, x2, y2 = map(int, track.to_ltrb())
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+        if label == 'person':
+            if track_id not in customer_ids:
+                customer_ids[track_id] = f"Customer_{customer_counter:03d}"
+                customer_counter += 1
+            customer_id = customer_ids[track_id]
+            person_centers[track_id] = (cx, cy)
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, customer_id, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        else:
+            if track_id not in product_ids:
+                product_ids[track_id] = f"Product_{product_counter:03d}"
+                product_counter += 1
+            product_id = product_ids[track_id]
+
+            for person_tid, (px, py) in person_centers.items():
+                distance = ((cx - px)*2 + (cy - py)2)*0.5
+                if distance < distance_threshold:
+                    now = time.time()
+                    if track_id not in product_seen_time:
+                        product_seen_time[track_id] = now
+                    elif now - product_seen_time[track_id] > pickup_threshold:
+                        picked_products[track_id] = (x1, y1, x2, y2)
+                        cust_id = customer_ids[person_tid]
+                        customer_product_map.setdefault(cust_id, set()).add(product_id)
+                    break
+            else:
+                product_seen_time.pop(track_id, None)
+
+    for pid, (x1, y1, x2, y2) in picked_products.items():
+        label = product_ids[pid]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    cv2.imshow("Supermarket Tracker", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+
+print("\n--- Final Pickup Log ---")
+for customer, products in customer_product_map.items():
+    print(f"{customer} picked: {', '.join(products)}")     # in live webcam to detect object customer how much product picked up and re-id als
